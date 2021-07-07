@@ -42,8 +42,42 @@ ex()
     fi
 }
 
+
+function show_help
+{
+    echo "This script is for generating GDRCopy RPM packages."
+    echo
+    echo "Usage: CUDA=<path> $0 [-m]"
+    echo
+    echo "Optional arguments:"
+    echo "  -m              Generate kmod package (default: no)."
+    echo
+    echo "Environment variables:"
+    echo "  CUDA=<path>             [Required] CUDA installation path (usually /usr/local/cuda)."
+    echo "  NVIDIA_SRC_DIR=<path>   [Optional] NVIDIA driver source directory (usually /usr/src/nvidia-<version>/nvidia)."
+}
+
+OPTIND=1	# Reset in case getopts has been used previously in the shell.
+
+generate_kmod=0
+
+while getopts "h?m" opt; do
+    case "$opt" in
+    h|\?)
+        show_help
+        exit 0
+        ;;
+    m)  generate_kmod=1
+        ;;
+    esac
+done
+
+shift $((OPTIND-1))
+
+
 if [ "X$CUDA" == "X" ]; then
-    echo "CUDA environment variable is not defined"; exit 1
+    echo "CUDA environment variable is not defined"
+    exit 1
 fi
 
 echo "Building rpm package ..."
@@ -60,6 +94,24 @@ if [ "X$VERSION" == "X" ]; then
     exit 1
 fi
 FULL_VERSION="${VERSION}"
+
+if [[ ${generate_kmod} == 1 ]]; then
+    if [ -z "${NVIDIA_SRC_DIR}" ]; then
+        NVIDIA_SRC_DIR=$(find /usr/src/nvidia-* -name "nv-p2p.h" -print -quit)
+        if [ ${#NVIDIA_SRC_DIR} -gt 0 ]; then
+            NVIDIA_SRC_DIR=$(dirname ${NVIDIA_SRC_DIR})
+        fi
+    fi
+
+    if [ -d ${NVIDIA_SRC_DIR} ]; then
+        NVIDIA_DRIVER_VERSION=$(basename $(dirname ${NVIDIA_SRC_DIR}))
+    else
+        echo "NVIDIA_SRC_DIR=${NVIDIA_SRC_DIR}" >&2
+        echo "Failed to find NVIDIA driver!" >&2
+        exit 1
+    fi
+fi
+
 
 tmpdir=`mktemp -d /tmp/gdr.XXXXXX`
 if [ ! -d "$tmpdir" ]; then
@@ -91,13 +143,30 @@ ex mkdir -p $tmpdir/topdir/{SRPMS,RPMS,SPECS,BUILD,SOURCES}
 ex cp gdrcopy-$VERSION/gdrcopy.spec $tmpdir/topdir/SPECS/
 ex cp gdrcopy-$VERSION.tar.gz $tmpdir/topdir/SOURCES/
 
-rpmbuild -ba --nodeps --define "_topdir $tmpdir/topdir" --define "_release ${RPM_VERSION}" --define 'dist %{nil}' --define "CUDA $CUDA" --define "GDR_VERSION ${VERSION}" --define "KVERSION $(uname -r)" --define "MODULE_LOCATION ${MODULE_SUBDIR}" $tmpdir/topdir/SPECS/gdrcopy.spec
+rpmbuild_params="-ba --nodeps --define '_build_id_links none' --define \"_topdir $tmpdir/topdir\" --define \"_release ${RPM_VERSION}\" --define 'dist %{nil}' --define \"CUDA $CUDA\" --define \"GDR_VERSION ${VERSION}\" --define \"KVERSION $(uname -r)\" --define \"MODULE_LOCATION ${MODULE_SUBDIR}\""
+if [[ ${generate_kmod} == 1 ]]; then
+    rpmbuild_params="${rpmbuild_params} --define \"NVIDIA_DRIVER_VERSION ${NVIDIA_DRIVER_VERSION}\" --define \"NVIDIA_SRC_DIR ${NVIDIA_SRC_DIR}\" --define \"BUILD_KMOD 1\""
+fi
+rpmbuild_params="${rpmbuild_params} $tmpdir/topdir/SPECS/gdrcopy.spec"
+eval "rpmbuild ${rpmbuild_params}"
+
 rpms=`ls -1 $tmpdir/topdir/RPMS/*/*.rpm`
 srpm=`ls -1 $tmpdir/topdir/SRPMS/`
+if [ -f "/etc/redhat-release" ]; then
+    release_version=".el$(cat /etc/redhat-release | grep -o -E '[0-9]+' | head -1)"
+elif [ -f "/etc/centos-release" ]; then
+    release_version=".el$(cat /etc/centos-release | grep -o -E '[0-9]+' | head -1)"
+else
+    release_version="unknown_distro"
+fi
 echo $srpm $rpms
 ex cd ${CWD}
-ex cp $tmpdir/topdir/SRPMS/*.rpm .
-ex cp $tmpdir/topdir/RPMS/*/*.rpm .
+for item in `ls $tmpdir/topdir/SRPMS/*.rpm $tmpdir/topdir/RPMS/*/*.rpm`; do
+    item_name=`basename $item`
+    item_name=`echo $item_name | sed -e "s/\.rpm//g"`
+    item_name="${item_name}${release_version}.rpm"
+    ex cp $item ./${item_name}
+done
 
 echo
 echo "Cleaning up ..."
